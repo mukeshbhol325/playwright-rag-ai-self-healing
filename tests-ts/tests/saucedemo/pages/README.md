@@ -1,0 +1,1 @@
+Page Object Model classes for the Sauce Demo tests. Each class owns page locators and reusable user actions; scenario assertions remain in the spec files.

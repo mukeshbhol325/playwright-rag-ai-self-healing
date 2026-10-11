@@ -1,0 +1,21 @@
+# Runs the Python healer service. Run the Playwright tests on your machine (npm run test:*)
+# and point them at it with HEALER_URL (default http://localhost:8000).
+services:
+  healer:
+    build: ./healer-service
+    ports:
+      - "8000:8000"
+    env_file:
+      - ./healer-service/.env
+    volumes:
+      - healer-data:/srv/data   # persists the Chroma knowledge base between runs
+    environment:
+      KB_DIR: /srv/data/chroma
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  healer-data:

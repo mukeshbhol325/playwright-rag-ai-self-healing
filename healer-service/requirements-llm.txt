@@ -1,0 +1,3 @@
+# Optional: install the provider you set in LLM_PROVIDER
+langchain-anthropic>=0.3
+langchain-openai>=0.2

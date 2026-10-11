@@ -1,0 +1,14 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+healer-service/.env
+healer-service/data/
+
+# Node / Playwright
+node_modules/
+tests-ts/.env
+tests-ts/test-results/
+tests-ts/playwright-report/
+tests-ts/reports/

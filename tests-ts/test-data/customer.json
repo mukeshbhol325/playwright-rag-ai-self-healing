@@ -1,0 +1,9 @@
+{
+  "firstName": "Asha",
+  "lastName": "Reddy",
+  "email": "replaced-at-runtime@example.com",
+  "address1": "12 Test Street",
+  "city": "London",
+  "postcode": "SW1A 1AA",
+  "country": "United Kingdom"
+}
