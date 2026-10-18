@@ -1,103 +1,135 @@
-# Self-Healing Playwright Framework with a RAG Locator Healer
+# Self-Healing Playwright Framework
 
-A UI test framework for [demo.opencart.com](https://demo.opencart.com/) built with **Playwright + TypeScript**. When a locator breaks, the framework sends the page DOM and error over a **REST API** to a **Python (FastAPI + LangChain + Chroma) RAG service**. The service proposes replacement locators, the framework **validates them in the live page**, retries the action, and reports the outcome back so the service learns.
+UI tests written with **Playwright and TypeScript** that repair their own broken locators.
 
-```mermaid
-flowchart LR
-  subgraph TS["tests-ts  (Playwright + TypeScript)"]
-    T[Spec] --> PO[Page Objects] --> HP[HealingPage]
-    HP --> REG[LocatorRegistry<br/>locators.json]
-    HP --> VAL[LocatorValidator]
-    REP[HealingReporter]
-  end
-  subgraph PY["healer-service  (Python)"]
-    API[FastAPI<br/>/heal /feedback /failures] --> RAG[RagHealer]
-    RAG --> HEU[HeuristicHealer<br/>DOM scoring]
-    RAG --> KB[(Chroma KB<br/>LangChain)]
-    RAG -. optional .-> LLM[LLM re-rank<br/>Anthropic / OpenAI]
-    API --> FA[FailureAnalyzer]
-  end
-  HP -- "POST /heal (DOM + error)" --> API
-  HP -- "POST /feedback" --> API
-  REP -- "POST /failures (after run)" --> API
-```
+When a locator stops matching, the framework sends the page DOM and the error to a **Python service** (FastAPI, LangChain, Chroma, optional Gemini) over REST. The service suggests replacements, the framework **checks each suggestion in the live page** before using it, retries the step, and reports exactly what it changed.
 
-## What is in the repo
+Demo target: [saucedemo.com](https://www.saucedemo.com) (login, browse, cart and checkout).
 
-| Folder | Purpose |
-|---|---|
-| `tests-ts/` | Playwright + TypeScript framework: `pages/`, `components/`, `fixtures/`, `healing/`, `api/`, `utils/`, `config/`, `locators/`, `types/`, `reporters/`, `tests/` (smoke, e2e, healing, integration), `test-data/` |
-| `healer-service/` | Python service: `api/`, `core/`, `models/`, `services/`, `rag/`, `llm/`, `tests/` |
-| `docs/LLD.md` | Low-level design, sequence diagram, contracts |
-| `docker-compose.yml`, `.github/workflows/ci.yml` | Run the service in Docker; CI pipeline |
+## Features
 
-## Flows covered (OpenCart demo)
+- **Locator keys, not raw selectors.** Page objects use keys such as `checkout.firstName`; all selectors live in one file, `src/locators/locators.json`.
+- **Validated healing.** A suggested locator is used only if it matches exactly one visible element that suits the action.
+- **Learns from results.** Successful fixes are stored in a Chroma knowledge base and reused next time.
+- **Honest reporting.** Every heal is listed in a report, and a CI gate (`MAX_HEALS`) can fail the build if too many locators were healed.
+- **Failure-safe.** If the service is down or slow, tests behave like ordinary Playwright tests.
+- **Works offline.** No API key is needed; Gemini is optional.
+- **Ships with** Dockerfiles, a Jenkins pipeline and GitHub Actions.
 
-- **Smoke:** store front loads, top menu opens *Phones & PDAs*, search finds the iPhone.
-- **Smartphone category** (`/en-gb/catalog/smartphone`): lists phones, adds *any* phone (the first listed) to the cart, adds a named phone, adds 2 units from the product page.
-- **Cart:** shows the added phone, updates quantity, removes the item (empty cart message).
-- **Guest checkout:** add any phone, cart, checkout, personal details, shipping address, shipping method, payment method, confirm order, "Your order has been placed!".
-- **Self-healing:** the same flows with selected locators deliberately made stale; the framework must heal them and still finish the purchase.
+## How it works
+
+1. A test calls a page object. The page object asks `HealingPage` to act on a locator key, which is resolved to a selector.
+2. `HealingPage` runs the action with a short timeout (5 s by default).
+3. If it fails and the selector does not match exactly one visible element, it sends a privacy-scrubbed DOM snapshot and the error to `POST /heal`.
+4. The service looks up earlier successful fixes, scores every visible interactive element against the intent of the broken selector, retrieves similar past repairs, and (if Gemini is configured) lets the model re-rank. It returns up to 3 candidates with confidence scores.
+5. The framework keeps candidates with confidence of 0.6 or more, validates each one, retries the action, and reports the result to `POST /feedback`.
+6. After the run, failed tests are sent to `POST /failures` for classification (locator drift, assertion, network and so on). Reports are written to `tests-ts/reports/healing/`.
+
+Only element **lookups** are healed, never assertions, so healing cannot hide a real bug.
 
 ## Quick start
 
-**1. Healer service** (Python 3.11+)
+Requirements: Python 3.11+ and Node 20+.
 
-```bash
+### 1. Start the healer service
+
+```powershell
 cd healer-service
-python -m venv .venv && source .venv/bin/activate      # Windows: .venv\Scripts\activate
+python -m venv .venv
+.venv\Scripts\activate
 pip install -r requirements-dev.txt
-cp .env.example .env                                    # LLM_PROVIDER=none works with no API key
+copy .env.example .env
 uvicorn app.main:app --port 8000
-pytest                                                  # 30 tests
 ```
 
-Or `docker compose up --build` from the repo root.
+On macOS or Linux use `source .venv/bin/activate` and `cp .env.example .env`.
 
-**2. Tests** (Node 20+)
+Check `http://localhost:8000/health`. Interactive API docs are at `http://localhost:8000/docs`. Run the service tests with `pytest`.
 
-```bash
+**Gemini is optional.** To use it, put your key in `healer-service/.env`:
+
+```env
+GEMINI_API_KEY=your-key
+LLM_PROVIDER=gemini
+EMBEDDINGS_PROVIDER=gemini
+```
+
+To run with no key, set `LLM_PROVIDER=none` and `EMBEDDINGS_PROVIDER=hashing`. The service then uses heuristics, memory and local embeddings. Restart it after changing `.env`.
+
+### 2. Run the tests
+
+```powershell
 cd tests-ts
 npm install
 npx playwright install chromium
-cp .env.example .env
-
-npm run test:smoke       # fast sanity check of the live site
-npm run test:e2e         # smartphone, cart and checkout flows
-npm run test:healing     # stale locators healed through the service (service must be running)
-npm run test:offline     # same healing loop against a local mock page, no internet needed
-npm run test:drift       # run all @e2e flows with stale locators injected
-npm run report           # open the Playwright HTML report
+copy .env.example .env
 ```
 
-After a run, open `tests-ts/reports/healing/healing-report.md` for healed locators and failure analysis.
+| Command | What it runs |
+|---|---|
+| `npm run test:saucedemo` | The Sauce Demo suite: login, browse and sort, cart, checkout information, complete order |
+| `npm run typecheck` | TypeScript type check |
+| `npm run report` | Open the Playwright HTML report |
 
-### Optional: use an LLM
+After a run, open `tests-ts/reports/healing/healing-report.md` to see what was healed and why.
 
-In `healer-service/.env` set `LLM_PROVIDER=anthropic` (or `openai`), add the API key, and `pip install -r requirements-llm.txt`. The LLM then re-ranks candidates using the DOM digest plus similar past repairs retrieved from the knowledge base. If the LLM is down or returns junk, the service silently falls back to heuristics + memory.
+### See healing in action
 
-## How healing works
+Add stale selectors for the login keys to `STALE_SELECTORS` in `src/utils/drift.ts`:
 
-1. Page objects use locator **keys** (`checkout.firstName`), resolved by `LocatorRegistry` from `src/locators/locators.json`.
-2. `HealingPage` tries the selector with a short timeout (`HEAL_ACTION_TIMEOUT_MS`, default 5 s).
-3. If it fails *and the selector does not resolve to a single visible element*, it sends a privacy-scrubbed DOM snapshot and the error to `POST /heal`.
-4. The service checks its **memory** (previous successful heals), scores visible interactive elements against the **intent tokens** of the broken selector, retrieves similar past cases from **Chroma**, and optionally lets an **LLM** re-rank.
-5. The framework **validates** each candidate (exactly one visible element, right element type for the action), retries the action, and calls `POST /feedback`.
-6. The heal is recorded and listed in the report. After the run, failed tests are posted to `POST /failures` for categorisation (locator drift, assertion, network, ...) and fix hints.
+```ts
+'sd.login.username': '#user-name-field',
+'sd.login.password': '#password-input',
+'sd.login.button': '#login-submit-button',
+```
 
-Design rules: only element *lookups* are healed, never assertions; low-confidence candidates (`MIN_CONFIDENCE`, default 0.6) are ignored; if the service is down the test fails normally; `MAX_HEALS` can fail a build that heals too much so healing never hides real breakage.
+With the healer service running, start the suite in drift mode (PowerShell):
 
-## What has been verified, and what has not
+```powershell
+$env:SIMULATE_DRIFT="true"; npm run test:saucedemo
+Remove-Item Env:SIMULATE_DRIFT      # turn it off afterwards
+```
 
-Verified while building (in a sandbox with no access to the public internet):
+The framework replaces those selectors with the stale ones, heals them through the service, and the tests still pass. The healing report shows each original and healed selector.
 
-- Python service: **30 pytest tests pass** (heuristics, API, memory learning, LLM path with a fake provider, failure classification).
-- TypeScript: `tsc --noEmit` is clean and Playwright discovers all 13 tests.
-- Offline integration against a local OpenCart-style page with a real Chromium and the live service: **6 of 6 stale locators healed to the correct elements** (including a check that the neighbouring `address-2` field stayed empty), a repeated heal answered **from memory**, a page with no matching element **failed clearly instead of healing wrongly**, and the reporter posted a failed test to `/failures` and classified it.
+## Configuration
 
-**Not verified: the specs against the live demo.opencart.com.** The sandbox could not reach it. The real-site locators in `locators.json` follow OpenCart 4.x conventions, but the checkout markup in particular varies between OpenCart 4 minor versions, and the public demo is shared and resets. Expect to run `test:smoke` and `test:e2e` once and adjust a locator or two in `locators.json`. That is a one-file change and a fair demonstration of why the registry exists.
+Settings live in `tests-ts/.env` (see `.env.example`):
 
-## Making it yours
+| Variable | Default | Purpose |
+|---|---|---|
+| `HEALER_URL` | `http://localhost:8000` | Healer service |
+| `HEALING_ENABLED` | `true` | Turn healing on or off |
+| `HEAL_ACTION_TIMEOUT_MS` | `5000` | Wait before asking for a heal |
+| `MIN_CONFIDENCE` | `0.6` | Ignore candidates below this score |
+| `MAX_HEALS` | `-1` | Fail the run if more locators are healed (-1 = no limit) |
+| `SIMULATE_DRIFT` | `false` | Break locators on purpose to demo healing |
 
-- Run it and record your own numbers (heal success rate, false-heal rate, time per heal). Each heal currently costs about 5 s because the first attempt waits `HEAL_ACTION_TIMEOUT_MS`; lower it to speed up healing.
-- Ideas to extend: a real embedding model, an LLM-written failure summary, a dashboard over `healing-report.json`, healing for Cypress/Selenium through the same API.
+The Sauce Demo specs use the full site address, so `BASE_URL` does not affect them.
+
+## Project layout
+
+- `tests-ts/` Playwright + TypeScript: `src/pages`, `src/components`, `src/fixtures`, `src/healing`, `src/api`, `src/reporters`, `src/locators`, `tests/`
+- `healer-service/` Python service: `app/api`, `app/services`, `app/rag`, `app/llm`, `app/models`, `tests/`
+- `Jenkinsfile`, `docker-compose.yml`, `.github/workflows/ci.yml` for delivery
+
+## Docker
+
+```bash
+docker compose up --build healer                 # service on :8000
+docker compose --profile tests run --rm tests npm run test:saucedemo   # Sauce Demo suite against it
+```
+
+Pass `GEMINI_API_KEY` through your shell or a root-level `.env` file; never commit it. The test image tag in `tests-ts/Dockerfile` must match the `@playwright/test` version in `package-lock.json`.
+
+## Jenkins
+
+The `Jenkinsfile` runs natively on a Windows agent (Python, Node and npm on the PATH) or in Docker mode. It needs a Jenkins "Secret text" credential with ID `gemini-api-key`, or untick `USE_GEMINI` to run without a key. Choose the suite with the `SUITE` parameter. Reports are archived on every build.
+
+## Status and limitations
+
+- The service has 37 passing tests. The healing loop was also verified end to end with a real browser against a local mock page.
+- The Sauce Demo suite depends on the site's current markup. Five input-field selectors in `locators.json` (`sd.login.username`, `sd.login.password`, `sd.info.firstName`, `sd.info.lastName`, `sd.info.postalCode`) were written from memory and may need a small update on the first run.
+- Healing relies on meaningful attributes, text or placeholders in the page, so it works best on markup that keeps some stable identifiers.
+- Elements that are only asserted (never clicked or filled) are not healed, by design.
+- A heal costs about 5 seconds (the first attempt's timeout). Lower `HEAL_ACTION_TIMEOUT_MS` to speed it up.
